@@ -231,8 +231,6 @@ def get_promociones_premium_df(excel_bytes: bytes) -> pd.DataFrame:
     plan_suffixes = ["", "2", "3", "4", "5", "6", "7", "8"]
     promo_cols = []
 
-    # ✅ OJO: en esta hoja los importes suelen venir como "$13,918.70"
-    # por eso se debe usar _money_to_float (NO pd.to_numeric directo).
     for i, suf in enumerate(plan_suffixes):
         base_col = 7 + i * 3
         for j, plazo in enumerate([24, 30, 36]):
@@ -277,7 +275,6 @@ def get_equipos_df(excel_bytes: bytes) -> pd.DataFrame:
     """
     df = pd.read_excel(BytesIO(excel_bytes), sheet_name="AT&T Premium", header=4)
 
-    # Mantener lo que ya existía, pero si hay "Modelo" también lo leemos para match más robusto
     base_cols = ["Nombre Completo", "Precio de Contado"]
     if "Modelo" in df.columns:
         base_cols = ["Nombre Completo", "Modelo", "Precio de Contado"]
@@ -288,13 +285,11 @@ def get_equipos_df(excel_bytes: bytes) -> pd.DataFrame:
     if "Modelo" in df.columns:
         df["Modelo"] = df["Modelo"].astype(str).str.strip()
 
-    # Precio de contado -> numérico limpio
     price = df["Precio de Contado"]
     price_str = price.astype(str).str.replace(r"[^\d,.-]", "", regex=True)
     price_str = price_str.str.replace(",", "", regex=False)
     df["PrecioLista"] = pd.to_numeric(price_str, errors="coerce")
 
-    # Vigencia base
     vig_cols = [c for c in df.columns if "vigencia" in str(c).lower()]
     if vig_cols:
         df["VigenciaTexto"] = df[vig_cols[0]]
@@ -306,8 +301,6 @@ def get_equipos_df(excel_bytes: bytes) -> pd.DataFrame:
     df = df.dropna(subset=["Nombre Completo", "PrecioLista"])
     df = df[df["Nombre Completo"].str.len() > 0].copy()
 
-    # ✅ Match key: preferir "Modelo" (porque Promociones suele traer solo el modelo),
-    # si no existe, usar "Nombre Completo".
     if "Modelo" in df.columns:
         df["MatchName"] = df["Modelo"]
     else:
@@ -315,18 +308,14 @@ def get_equipos_df(excel_bytes: bytes) -> pd.DataFrame:
 
     df["BaseKey"] = df["MatchName"].apply(_normalize_key)
 
-    # ✅ Guardar precios BASE por plan/plazo (de AT&T Premium) como Base_...
     base_promo_cols = [c for c in df.columns if re.match(r"^\s*\d+\s*Meses\d*\s*$", str(c))]
     for c in base_promo_cols:
         df[f"Base_{str(c).strip()}"] = df[c].apply(_money_to_float)
 
-    # ✅ IMPORTANTÍSIMO: eliminar columnas "Meses" originales antes del merge
     df = df.drop(columns=base_promo_cols, errors="ignore")
 
-    # Promos vigentes
     promos = get_promociones_premium_df(excel_bytes)
 
-    # Si no hay promos, regresamos base
     if promos.empty:
         out = df.copy()
         out["VigenciaHasta"] = out["VigenciaHastaBase"]
@@ -340,11 +329,6 @@ def get_equipos_df(excel_bytes: bytes) -> pd.DataFrame:
     promo_keys = promos["PromoKey"].tolist()
 
     def _find_promo_idx(base_key: str):
-        """
-        Match robusto:
-        - pk in base_key  OR  base_key in pk
-        - Escoge el mejor candidato por overlap y cercanía de longitud
-        """
         if not base_key:
             return None
 
@@ -358,7 +342,7 @@ def get_equipos_df(excel_bytes: bytes) -> pd.DataFrame:
             if (pk in base_key) or (base_key in pk):
                 overlap = min(len(pk), len(base_key))
                 length_gap = abs(len(pk) - len(base_key))
-                score = (overlap, -length_gap, -len(pk))  # mayor overlap, menor gap, menor pk
+                score = (overlap, -length_gap, -len(pk))
                 if best_score is None or score > best_score:
                     best_score = score
                     best_i = i
@@ -383,7 +367,6 @@ def get_equipos_df(excel_bytes: bytes) -> pd.DataFrame:
 
     df["VigenciaHasta"] = df.apply(_vigencia_final, axis=1)
 
-    # Solo vigentes
     today = date.today()
     df = df[df["VigenciaHasta"] >= today].copy()
 
@@ -434,7 +417,6 @@ def get_plan_options(excel_bytes: bytes):
 
 
 def _promo_valida_para_plan(row_equipo: pd.Series, plazo: int, plan_suffix: str) -> bool:
-    """True si hay valor numérico (no NA/NaN) en la columna promo del plan/plazo."""
     base = f"{plazo} Meses"
     col_promo = base + (plan_suffix if plan_suffix else "")
     if col_promo not in row_equipo.index:
@@ -457,7 +439,6 @@ def obtener_precio_promocional_equipo(row_equipo: pd.Series, plazo: int, plan_su
     col_promo = base + (plan_suffix if plan_suffix else "")
     col_base = f"Base_{col_promo}"
 
-    # 1) promo real
     if col_promo in row_equipo.index:
         try:
             v = float(row_equipo[col_promo])
@@ -466,7 +447,6 @@ def obtener_precio_promocional_equipo(row_equipo: pd.Series, plazo: int, plan_su
         except (TypeError, ValueError):
             pass
 
-    # 2) base por plan/plazo (AT&T Premium)
     if col_base in row_equipo.index:
         try:
             v = float(row_equipo[col_base])
@@ -475,7 +455,6 @@ def obtener_precio_promocional_equipo(row_equipo: pd.Series, plazo: int, plan_su
         except (TypeError, ValueError):
             pass
 
-    # 3) promo y base son NA -> NO APLICA
     return None
 
 
@@ -704,14 +683,12 @@ def crear_pdf_cotizacion(
     story.append(cards)
     story.append(Spacer(1, 10))
 
-    # ------------------ COMENTARIOS ------------------
     story.append(Paragraph("<b>Comentarios adicionales</b>", styles["HeaderBig"]))
 
     if comentarios and str(comentarios).strip():
         comentarios_html = pdf_safe_text(comentarios).replace("\n", "<br/>")
         story.append(Paragraph(comentarios_html, styles["Normal"]))
 
-    # si está vacío, no imprime nada debajo del título
     story.append(Spacer(1, 8))
 
     story.append(Paragraph("<b>Resumen de equipos</b>", styles["HeaderBig"]))
@@ -757,29 +734,36 @@ def crear_pdf_cotizacion(
 
         data_equipos.append(row)
 
+    # ✅ (valores correctos que me pasaste)
     if any_seguro:
         col_widths_equipos = scale_widths([32, 27, 27, 25, 17, 15, 24, 19, 22, 20, 22])
     else:
         col_widths_equipos = scale_widths([45, 27, 27, 17, 17, 17, 17, 17, 17])
 
     tabla_equipos = Table(data_equipos, colWidths=col_widths_equipos, repeatRows=1)
-    tabla_equipos.setStyle(
-        TableStyle(
-            [
-                ("GRID", (0, 0), (-1, -1), 0.5, colors.black),
-                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#E5F7FF")),
-                ("ALIGN", (0, 0), (-1, 0), "CENTER"),
-                ("ALIGN", (1, 1), (-1, -1), "RIGHT"),
-                ("ALIGN", (0, 1), (0, -1), "LEFT"),
-                ("ALIGN", (7, 1), (7, -1), "LEFT"),
-                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-                ("FONTSIZE", (0, 0), (-1, -1), 8),
-                ("TOPPADDING", (0, 0), (-1, -1), 2),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
-                ("WORDWRAP", (0, 0), (-1, -1), "CJK"),
-            ]
-        )
-    )
+
+    # ✅ Highlight portabilidad (mismo color) en PDF
+    port_bg = colors.HexColor("#D9F4FF")
+    ts = [
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.black),
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#E5F7FF")),
+        ("ALIGN", (0, 0), (-1, 0), "CENTER"),
+        ("ALIGN", (1, 1), (-1, -1), "RIGHT"),
+        ("ALIGN", (0, 1), (0, -1), "LEFT"),
+        ("ALIGN", (7, 1), (7, -1), "LEFT"),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("FONTSIZE", (0, 0), (-1, -1), 8),
+        ("TOPPADDING", (0, 0), (-1, -1), 2),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+        ("WORDWRAP", (0, 0), (-1, -1), "CJK"),
+    ]
+    for i, item in enumerate(equipos or []):
+        if bool(item.get("portabilidad", False)):
+            r = i + 1  # header row = 0
+            ts.append(("BACKGROUND", (0, r), (-1, r), port_bg))
+
+    tabla_equipos.setStyle(TableStyle(ts))
+
     story.append(tabla_equipos)
     story.append(Spacer(1, 8))
 
@@ -790,34 +774,40 @@ def crear_pdf_cotizacion(
             Paragraph("PLAN", styles["HeaderSmall"]),
             Paragraph("COSTO", styles["HeaderSmall"]),
             Paragraph("GB", styles["HeaderSmall"]),
+            Paragraph("PORTABILIDAD", styles["HeaderSmall"]),
         ]]
+
         for p in planes_incluidos:
             data_planes.append(
                 [
                     Paragraph(pdf_safe_text(p["plan"]), styles["Normal"]),
                     Paragraph(f"${p['costo']:,.2f}", styles["Normal"]),
                     Paragraph(p.get("gb", ""), styles["Normal"]),
+                    Paragraph("Sí" if bool(p.get("portabilidad", False)) else "No", styles["Normal"]),
                 ]
             )
 
-        col_widths_planes = scale_widths([80, 45, 45])
+        col_widths_planes = scale_widths([70, 35, 25, 40])
 
         tabla_planes = Table(data_planes, colWidths=col_widths_planes)
-        tabla_planes.setStyle(
-            TableStyle(
-                [
-                    ("GRID", (0, 0), (-1, -1), 0.5, colors.black),
-                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#E5F7FF")),
-                    ("ALIGN", (0, 0), (-1, 0), "CENTER"),
-                    ("ALIGN", (1, 1), (-1, -1), "RIGHT"),
-                    ("ALIGN", (0, 1), (0, -1), "LEFT"),
-                    ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-                    ("FONTSIZE", (0, 0), (-1, -1), 8),
-                    ("TOPPADDING", (0, 0), (-1, -1), 2),
-                    ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
-                ]
-            )
-        )
+        ts2 = [
+            ("GRID", (0, 0), (-1, -1), 0.5, colors.black),
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#E5F7FF")),
+            ("ALIGN", (0, 0), (-1, 0), "CENTER"),
+            ("ALIGN", (1, 1), (-1, -1), "RIGHT"),
+            ("ALIGN", (0, 1), (0, -1), "LEFT"),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("FONTSIZE", (0, 0), (-1, -1), 8),
+            ("TOPPADDING", (0, 0), (-1, -1), 2),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+        ]
+        for i, p in enumerate(planes_incluidos or []):
+            if bool(p.get("portabilidad", False)):
+                r = i + 1
+                ts2.append(("BACKGROUND", (0, r), (-1, r), port_bg))
+
+        tabla_planes.setStyle(TableStyle(ts2))
+
         story.append(tabla_planes)
         story.append(Spacer(1, 6))
 
@@ -926,6 +916,9 @@ if "comentarios" not in st.session_state:
 if "fichas_tecnicas" not in st.session_state:
     st.session_state["fichas_tecnicas"] = []
 
+if "is_portabilidad" not in st.session_state:
+    st.session_state["is_portabilidad"] = False
+
 
 # ----------------------------------------------------
 # LOGIN PAGE (protects the whole app)
@@ -1020,17 +1013,16 @@ with col_izq:
         plan_label_sel = st.selectbox("Plan (nombre comercial):", plan_labels)
         selected_plan = next(p for p in plan_options if p["plan"] == plan_label_sel)
         plan_sel = selected_plan["plan"]
-        plan_costo = float(selected_plan["costo"])
+        plan_costo_base = float(selected_plan["costo"])
         plan_gb = selected_plan["gb"]
         plan_suffix = selected_plan.get("suffix", "")
     else:
         st.warning("No se encontraron planes en el archivo. Se usará un plan sin costo.")
         plan_sel = "Plan sin costo"
-        plan_costo = 0.0
+        plan_costo_base = 0.0
         plan_gb = ""
         plan_suffix = ""
 
-    # Plazos SOLO desde columnas de promos (aunque el valor sea NA -> cae a base)
     plan_promo_cols = [
         c for c in df_equipos_vista.columns
         if re.match(rf"^(\d+)\s*Meses{re.escape(plan_suffix)}$", str(c))
@@ -1058,26 +1050,31 @@ with col_izq:
 
     agregar_seguro = st.checkbox("Agregar seguro de protección (opcional)")
 
+    portabilidad_sel = st.checkbox(
+        "📲 Cotización por Portabilidad (20% de descuento en el costo del plan)",
+        value=st.session_state["is_portabilidad"],
+    )
+    st.session_state["is_portabilidad"] = portabilidad_sel
+
     if st.button("Ingresar", type="primary"):
         promo = obtener_precio_promocional_equipo(precio_row, plazo, plan_suffix)
 
-        # ✅ NO APLICA (promo y base NA/NaN)
         if promo is None:
             st.error("❌ No Aplica para ese PLAN y PLAZO (NA en base y sin promoción válida).")
         else:
+            plan_costo = float(plan_costo_base) * (0.8 if portabilidad_sel else 1.0)
+
             ahorro = max(precio_lista - promo, 0.0)
             enganche_mxn = promo * (porc_eng / 100.0)
             if plazo > 0:
                 pago_equipo_mensual = (promo - enganche_mxn) / plazo
             else:
                 pago_equipo_mensual = 0.0
+
             equipo_mas_plan = pago_equipo_mensual + float(plan_costo)
 
-            # ---------------- SEGURO (por equipo) ----------------
             seguro_selected = bool(agregar_seguro)
 
-            # Si hay promoción válida para ese plan/plazo -> usar promo para calcular seguro
-            # Si NO hay promo válida -> usar Precio Lista para calcular seguro
             promo_valida = _promo_valida_para_plan(precio_row, plazo, plan_suffix)
             precio_base_seguro = float(promo) if promo_valida else float(precio_lista)
 
@@ -1094,9 +1091,11 @@ with col_izq:
             else:
                 seguro_no_aplica = False
                 seguro_mensual_num = 0.0
-                seguro_display = "Sin seguro"  # ✅ antes salía $0.00 en escenarios mixtos
+                seguro_display = "Sin seguro"
 
-            total_mensual = float(equipo_mas_plan) + (seguro_mensual_num if (seguro_selected and not seguro_no_aplica) else 0.0)
+            total_mensual = float(equipo_mas_plan) + (
+                seguro_mensual_num if (seguro_selected and not seguro_no_aplica) else 0.0
+            )
 
             st.session_state["equipos_cotizacion"].append(
                 dict(
@@ -1110,16 +1109,18 @@ with col_izq:
                     plan=plan_sel,
                     eq_plan=equipo_mas_plan,
                     plan_costo=float(plan_costo),
+                    plan_costo_base=float(plan_costo_base),
                     plan_gb=plan_gb,
                     vigencia_hasta=vigencia_hasta_equipo,
                     plan_suffix=plan_suffix,
 
-                    # ✅ seguro
                     seguro_selected=seguro_selected,
                     seguro_no_aplica=seguro_no_aplica,
                     seguro_mensual=seguro_mensual_num,
                     seguro_display=seguro_display,
                     total_mensual=total_mensual,
+
+                    portabilidad=bool(portabilidad_sel),
                 )
             )
             st.success("Equipo agregado a la cotización.")
@@ -1129,9 +1130,15 @@ with col_der:
     st.subheader("Datos del cliente")
     st.session_state["cliente"] = st.text_input("Nombre del cliente:", value=st.session_state["cliente"])
     st.session_state["cliente_tel"] = st.text_input("Teléfono del cliente:", value=st.session_state["cliente_tel"])
-    st.session_state["cliente_email"] = st.text_input("Correo electrónico del cliente:", value=st.session_state["cliente_email"])
-    st.session_state["cliente_dir"] = st.text_area("Dirección del cliente:", value=st.session_state["cliente_dir"], height=60)
-    st.session_state["comentarios"] = st.text_area("Comentarios (se incluyen en el PDF):", value=st.session_state["comentarios"], height=80)
+    st.session_state["cliente_email"] = st.text_input(
+        "Correo electrónico del cliente:", value=st.session_state["cliente_email"]
+    )
+    st.session_state["cliente_dir"] = st.text_area(
+        "Dirección del cliente:", value=st.session_state["cliente_dir"], height=60
+    )
+    st.session_state["comentarios"] = st.text_area(
+        "Comentarios (se incluyen en el PDF):", value=st.session_state["comentarios"], height=80
+    )
 
     fichas_files = st.file_uploader(
         "Fichas técnicas (hasta 3 imágenes):",
@@ -1200,8 +1207,18 @@ else:
     if any_seguro:
         fmt["TOTAL MENSUAL"] = "${:,.2f}"
 
+    port_flags = df_items.get("portabilidad", pd.Series([False] * len(df_items))).fillna(False).astype(bool).tolist()
+    hl_css = "background-color: rgba(0,174,239,0.22);"
+
+    def _hl_portabilidad_row(row):
+        try:
+            is_port = bool(port_flags[int(row.name)])
+        except Exception:
+            is_port = False
+        return [hl_css if is_port else "" for _ in row]
+
     st.dataframe(
-        df_mostrar.style.format(fmt),
+        df_mostrar.style.format(fmt).apply(_hl_portabilidad_row, axis=1),
         width="stretch",
     )
 
@@ -1228,6 +1245,7 @@ else:
             st.session_state["fecha_validez_str"] = ""
             st.session_state["comentarios"] = ""
             st.session_state["fichas_tecnicas"] = []
+            st.session_state["is_portabilidad"] = False
             st.info("Se inició una nueva cotización (se conservarán ejecutivo, ATTUID y archivo).")
             rerun()
 
@@ -1259,16 +1277,32 @@ if len(st.session_state["equipos_cotizacion"]) > 0:
         f"({dias_validez_pdf} días)."
     )
 
+    # ✅ incluir portabilidad y mostrarlo
     df_planes_incl = (
-        df_items[["plan", "plan_costo", "plan_gb"]]
+        df_items[["plan", "plan_costo", "plan_gb", "portabilidad"]]
         .drop_duplicates()
-        .rename(columns={"plan": "PLAN", "plan_costo": "COSTO", "plan_gb": "GB"})
+        .rename(columns={"plan": "PLAN", "plan_costo": "COSTO", "plan_gb": "GB", "portabilidad": "PORTABILIDAD"})
     )
+    df_planes_incl["PORTABILIDAD"] = df_planes_incl["PORTABILIDAD"].fillna(False).astype(bool).map(lambda x: "Sí" if x else "No")
+
+    def _hl_port_plan(row):
+        return [hl_css if str(row.get("PORTABILIDAD", "")).strip() == "Sí" else "" for _ in row]
+
     st.subheader("Planes incluidos")
-    st.dataframe(df_planes_incl, width="stretch")
+    st.dataframe(
+        df_planes_incl.style.format({"COSTO": "${:,.2f}"}).apply(_hl_port_plan, axis=1),
+        width="stretch",
+    )
 
     for _, row in df_planes_incl.iterrows():
-        planes_incluidos.append(dict(plan=row["PLAN"], costo=row["COSTO"], gb=row["GB"]))
+        planes_incluidos.append(
+            dict(
+                plan=row["PLAN"],
+                costo=float(str(row["COSTO"]).replace("$", "").replace(",", "")) if isinstance(row["COSTO"], str) else float(row["COSTO"]),
+                gb=row["GB"],
+                portabilidad=True if row["PORTABILIDAD"] == "Sí" else False,
+            )
+        )
 else:
     st.markdown("**Vigencia de la cotización:** pendiente (sin equipos).")
 
