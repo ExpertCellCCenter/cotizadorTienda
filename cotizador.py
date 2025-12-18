@@ -1075,8 +1075,10 @@ with col_izq:
 
             seguro_selected = bool(agregar_seguro)
 
-            promo_valida = _promo_valida_para_plan(precio_row, plazo, plan_suffix)
-            precio_base_seguro = float(promo) if promo_valida else float(precio_lista)
+            # Si el equipo tiene promoción (ahorro > 0) -> usar promo para calcular seguro
+            # Si NO tiene promoción -> usar Precio Lista para calcular seguro
+            tiene_promocion = float(ahorro) > 0.0
+            precio_base_seguro = float(promo) if tiene_promocion else float(precio_lista)
 
             if seguro_selected:
                 seguro_mensual = calcular_seguro_mensual(precio_base_seguro)
