@@ -163,16 +163,16 @@ def calcular_seguro_mensual(precio_base_seguro: float):
     if pd.isna(p) or p < 500:
         return None
 
-    if 500 <= p <= 2500:
-        return 69.0
-    if 2501 <= p <= 4000:
+    if 500 <= p <= 4000:
         return 99.0
     if 4001 <= p <= 6000:
-        return 139.0
+        return 159.0
     if 6001 <= p <= 13000:
-        return 199.0
-    if p >= 13001:
-        return 239.0
+        return 219.0
+    if 13001 <= p <= 38000:
+        return 254.0
+    if p >= 38001:
+        return 279.0
 
     return None
 
@@ -470,6 +470,7 @@ def generar_folio(fecha: datetime) -> str:
 def crear_pdf_cotizacion(
     ejecutivo,
     attuid,
+    ejecutivo_tel,  # ✅ teléfono del ejecutivo
     cliente,
     cliente_tel,
     cliente_email,
@@ -607,11 +608,13 @@ def crear_pdf_cotizacion(
     )
     center_para = Paragraph(center_html, styles["HeaderCenter"])
 
+    ej_tel_str = ejecutivo_tel or "—"
     header_right_text = (
         f"<b>FOLIO:</b> {folio}<br/>"
         f"<b>Emitido:</b> {fecha_str}<br/>"
-        f"<b>Ejecutivo</b><br/>{ejecutivo}<br/>"
-        f"<b>ATTUID:</b> {attuid}"
+        f"<b>Ejecutivo</b><br/>{pdf_safe_text(ejecutivo)}<br/>"
+        f"<b>ATTUID:</b> {pdf_safe_text(attuid)}<br/>"
+        f"<b>Tel. Ejecutivo:</b> {pdf_safe_text(ej_tel_str)}"
     )
     right_para = Paragraph(header_right_text, styles["HeaderRight"])
 
@@ -631,7 +634,7 @@ def crear_pdf_cotizacion(
         (
             "<b>Esta cotización tiene validez de:</b><br/><br/>"
             f"<font size=18><b>{dias_validez} días</b></font><br/><br/>"
-            f"Emitida el {fecha_str} por {ejecutivo} (Ejecutivo AT&amp;T).<br/>"
+            f"Emitida el {fecha_str} por {pdf_safe_text(ejecutivo)} (Ejecutivo AT&amp;T).<br/>"
             "¡Gracias por su preferencia!"
         ),
         styles["Normal"],
@@ -734,7 +737,6 @@ def crear_pdf_cotizacion(
 
         data_equipos.append(row)
 
-    # ✅ (valores correctos que me pasaste)
     if any_seguro:
         col_widths_equipos = scale_widths([32, 27, 27, 25, 17, 15, 24, 19, 22, 20, 22])
     else:
@@ -742,7 +744,6 @@ def crear_pdf_cotizacion(
 
     tabla_equipos = Table(data_equipos, colWidths=col_widths_equipos, repeatRows=1)
 
-    # ✅ Highlight portabilidad (mismo color) en PDF
     port_bg = colors.HexColor("#D9F4FF")
     ts = [
         ("GRID", (0, 0), (-1, -1), 0.5, colors.black),
@@ -759,7 +760,7 @@ def crear_pdf_cotizacion(
     ]
     for i, item in enumerate(equipos or []):
         if bool(item.get("portabilidad", False)):
-            r = i + 1  # header row = 0
+            r = i + 1
             ts.append(("BACKGROUND", (0, r), (-1, r), port_bg))
 
     tabla_equipos.setStyle(TableStyle(ts))
@@ -775,6 +776,7 @@ def crear_pdf_cotizacion(
             Paragraph("COSTO", styles["HeaderSmall"]),
             Paragraph("GB", styles["HeaderSmall"]),
             Paragraph("PORTABILIDAD", styles["HeaderSmall"]),
+            Paragraph("CONTROL", styles["HeaderSmall"]),
         ]]
 
         for p in planes_incluidos:
@@ -784,10 +786,11 @@ def crear_pdf_cotizacion(
                     Paragraph(f"${p['costo']:,.2f}", styles["Normal"]),
                     Paragraph(p.get("gb", ""), styles["Normal"]),
                     Paragraph("Sí" if bool(p.get("portabilidad", False)) else "No", styles["Normal"]),
+                    Paragraph("Sí" if bool(p.get("control", False)) else "No", styles["Normal"]),
                 ]
             )
 
-        col_widths_planes = scale_widths([70, 35, 25, 40])
+        col_widths_planes = scale_widths([58, 30, 22, 38, 28])
 
         tabla_planes = Table(data_planes, colWidths=col_widths_planes)
         ts2 = [
@@ -802,13 +805,20 @@ def crear_pdf_cotizacion(
             ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
         ]
         for i, p in enumerate(planes_incluidos or []):
-            if bool(p.get("portabilidad", False)):
+            if bool(p.get("portabilidad", False)) or bool(p.get("control", False)):
                 r = i + 1
                 ts2.append(("BACKGROUND", (0, r), (-1, r), port_bg))
 
         tabla_planes.setStyle(TableStyle(ts2))
 
         story.append(tabla_planes)
+
+        # ✅ LEYENDA EN PDF (solo si hay portabilidades)
+        any_port_plan = any(bool(p.get("portabilidad", False)) for p in (planes_incluidos or []))
+        if any_port_plan:
+            story.append(Spacer(1, 3))
+            story.append(Paragraph("*La promoción de portabilidad esta sujeto a cambio sin previo aviso", styles["HeaderSmall"]))
+
         story.append(Spacer(1, 6))
 
     if fichas_tecnicas and len(fichas_tecnicas) > 0:
@@ -919,6 +929,14 @@ if "fichas_tecnicas" not in st.session_state:
 if "is_portabilidad" not in st.session_state:
     st.session_state["is_portabilidad"] = False
 
+# ✅ addon control
+if "is_control" not in st.session_state:
+    st.session_state["is_control"] = False
+
+# ✅ teléfono del ejecutivo
+if "ejecutivo_tel" not in st.session_state:
+    st.session_state["ejecutivo_tel"] = ""
+
 
 # ----------------------------------------------------
 # LOGIN PAGE (protects the whole app)
@@ -955,6 +973,7 @@ if not st.session_state["logged_in"]:
     with st.form("login"):
         ejecutivo = st.text_input("Nombre del ejecutivo:")
         attuid = st.text_input("ATTUID:")
+        ejecutivo_tel = st.text_input("Teléfono del ejecutivo:")
         archivo = st.file_uploader(
             "Sube la lista de precios (.xlsm / .xlsx / .xls)",
             type=["xlsm", "xlsx", "xls"],
@@ -962,11 +981,12 @@ if not st.session_state["logged_in"]:
         submitted = st.form_submit_button("Crear cotización")
 
     if submitted:
-        if not ejecutivo or not attuid or not archivo:
-            st.error("Por favor captura el nombre del ejecutivo, ATTUID y sube el archivo de precios.")
+        if not ejecutivo or not attuid or not ejecutivo_tel or not archivo:
+            st.error("Por favor captura el nombre del ejecutivo, ATTUID, teléfono del ejecutivo y sube el archivo de precios.")
         else:
             st.session_state["ejecutivo"] = ejecutivo
             st.session_state["attuid"] = attuid
+            st.session_state["ejecutivo_tel"] = ejecutivo_tel
             st.session_state["excel_bytes"] = archivo.getvalue()
             st.session_state["logged_in"] = True
             rerun()
@@ -979,7 +999,8 @@ if not st.session_state["logged_in"]:
 # ----------------------------------------------------
 st.title(
     f"Cotizador - Ejecutivo: {st.session_state['ejecutivo']} "
-    f"(ATTUID: {st.session_state['attuid']})"
+    f"(ATTUID: {st.session_state['attuid']}) "
+    f"(Tel: {st.session_state.get('ejecutivo_tel','')})"
 )
 
 excel_bytes = st.session_state["excel_bytes"]
@@ -1056,6 +1077,12 @@ with col_izq:
     )
     st.session_state["is_portabilidad"] = portabilidad_sel
 
+    control_sel = st.checkbox(
+        "🧩 Add-on Control (+$50/mes)",
+        value=st.session_state["is_control"],
+    )
+    st.session_state["is_control"] = control_sel
+
     if st.button("Ingresar", type="primary"):
         promo = obtener_precio_promocional_equipo(precio_row, plazo, plan_suffix)
 
@@ -1063,6 +1090,8 @@ with col_izq:
             st.error("❌ No Aplica para ese PLAN y PLAZO (NA en base y sin promoción válida).")
         else:
             plan_costo = float(plan_costo_base) * (0.8 if portabilidad_sel else 1.0)
+            control_costo = 50.0 if control_sel else 0.0
+            plan_costo = float(plan_costo) + float(control_costo)
 
             ahorro = max(precio_lista - promo, 0.0)
             enganche_mxn = promo * (porc_eng / 100.0)
@@ -1075,8 +1104,6 @@ with col_izq:
 
             seguro_selected = bool(agregar_seguro)
 
-            # Si el equipo tiene promoción (ahorro > 0) -> usar promo para calcular seguro
-            # Si NO tiene promoción -> usar Precio Lista para calcular seguro
             tiene_promocion = float(ahorro) > 0.0
             precio_base_seguro = float(promo) if tiene_promocion else float(precio_lista)
 
@@ -1123,6 +1150,9 @@ with col_izq:
                     total_mensual=total_mensual,
 
                     portabilidad=bool(portabilidad_sel),
+
+                    control=bool(control_sel),
+                    control_costo=float(control_costo),
                 )
             )
             st.success("Equipo agregado a la cotización.")
@@ -1248,6 +1278,7 @@ else:
             st.session_state["comentarios"] = ""
             st.session_state["fichas_tecnicas"] = []
             st.session_state["is_portabilidad"] = False
+            st.session_state["is_control"] = False
             st.info("Se inició una nueva cotización (se conservarán ejecutivo, ATTUID y archivo).")
             rerun()
 
@@ -1279,22 +1310,39 @@ if len(st.session_state["equipos_cotizacion"]) > 0:
         f"({dias_validez_pdf} días)."
     )
 
-    # ✅ incluir portabilidad y mostrarlo
     df_planes_incl = (
-        df_items[["plan", "plan_costo", "plan_gb", "portabilidad"]]
+        df_items[["plan", "plan_costo", "plan_gb", "portabilidad", "control"]]
         .drop_duplicates()
-        .rename(columns={"plan": "PLAN", "plan_costo": "COSTO", "plan_gb": "GB", "portabilidad": "PORTABILIDAD"})
+        .rename(columns={
+            "plan": "PLAN",
+            "plan_costo": "COSTO",
+            "plan_gb": "GB",
+            "portabilidad": "PORTABILIDAD",
+            "control": "CONTROL",
+        })
     )
     df_planes_incl["PORTABILIDAD"] = df_planes_incl["PORTABILIDAD"].fillna(False).astype(bool).map(lambda x: "Sí" if x else "No")
+    df_planes_incl["CONTROL"] = df_planes_incl["CONTROL"].fillna(False).astype(bool).map(lambda x: "Sí" if x else "No")
 
     def _hl_port_plan(row):
-        return [hl_css if str(row.get("PORTABILIDAD", "")).strip() == "Sí" else "" for _ in row]
+        return [
+            hl_css if (str(row.get("PORTABILIDAD", "")).strip() == "Sí" or str(row.get("CONTROL", "")).strip() == "Sí") else ""
+            for _ in row
+        ]
 
     st.subheader("Planes incluidos")
     st.dataframe(
         df_planes_incl.style.format({"COSTO": "${:,.2f}"}).apply(_hl_port_plan, axis=1),
         width="stretch",
     )
+
+    # ✅ LEYENDA EN STREAMLIT (solo si hay portabilidades)
+    try:
+        hay_port = df_items.get("portabilidad", pd.Series([False] * len(df_items))).fillna(False).astype(bool).any()
+    except Exception:
+        hay_port = False
+    if hay_port:
+        st.caption("*La promoción de portabilidad esta sujeto a cambio sin previo aviso")
 
     for _, row in df_planes_incl.iterrows():
         planes_incluidos.append(
@@ -1303,6 +1351,7 @@ if len(st.session_state["equipos_cotizacion"]) > 0:
                 costo=float(str(row["COSTO"]).replace("$", "").replace(",", "")) if isinstance(row["COSTO"], str) else float(row["COSTO"]),
                 gb=row["GB"],
                 portabilidad=True if row["PORTABILIDAD"] == "Sí" else False,
+                control=True if row["CONTROL"] == "Sí" else False,
             )
         )
 else:
@@ -1320,6 +1369,7 @@ else:
     pdf_bytes = crear_pdf_cotizacion(
         ejecutivo=st.session_state["ejecutivo"],
         attuid=st.session_state["attuid"],
+        ejecutivo_tel=st.session_state.get("ejecutivo_tel", ""),
         cliente=st.session_state["cliente"],
         cliente_tel=st.session_state["cliente_tel"],
         cliente_email=st.session_state["cliente_email"],
