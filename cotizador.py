@@ -148,6 +148,108 @@ def _money_to_float(v):
 
 
 # ----------------------------------------------------
+# ✅ PUNTOS DE VENTA (PLAZA -> PTO.DEVENTAGLOBAL)
+# ----------------------------------------------------
+def _norm_col(c) -> str:
+    c = "" if c is None else str(c)
+    c = unicodedata.normalize("NFKD", c)
+    c = "".join(ch for ch in c if not unicodedata.combining(ch))
+    c = c.upper()
+    c = re.sub(r"[^A-Z0-9]+", "", c)
+    return c
+
+
+@st.cache_data
+def _load_puntos_venta_from_paths(paths: tuple) -> pd.DataFrame:
+    """
+    Intenta cargar un Excel con columnas:
+      - PLAZA
+      - PTO.DEVENTAGLOBAL (o equivalente)
+    desde rutas locales (por ejemplo, incluido en tu repo).
+    """
+    for p in paths:
+        try:
+            if p and os.path.exists(p):
+                df = pd.read_excel(p)
+                cols_norm = {_norm_col(c): c for c in df.columns}
+                if "PLAZA" in cols_norm and ("PTODEVENTAGLOBAL" in cols_norm or "PUNTODEVENTAGLOBAL" in cols_norm):
+                    c_plaza = cols_norm["PLAZA"]
+                    c_pv = cols_norm.get("PTODEVENTAGLOBAL") or cols_norm.get("PUNTODEVENTAGLOBAL")
+                    out = df[[c_plaza, c_pv]].copy()
+                    out.columns = ["PLAZA", "PTO_VENTA_GLOBAL"]
+                    out["PLAZA"] = out["PLAZA"].astype("string").str.strip().str.upper()
+                    out["PTO_VENTA_GLOBAL"] = out["PTO_VENTA_GLOBAL"].astype("string").str.strip()
+
+                    # ✅ remove real NaN and also the literal "NAN"/"nan"
+                    out = out.dropna(subset=["PLAZA", "PTO_VENTA_GLOBAL"])
+                    out = out[
+                        (out["PLAZA"] != "") &
+                        (out["PTO_VENTA_GLOBAL"] != "") &
+                        (out["PLAZA"].str.upper() != "NAN") &
+                        (out["PTO_VENTA_GLOBAL"].str.upper() != "NAN")]
+                    out = out.dropna(subset=["PLAZA", "PTO_VENTA_GLOBAL"])
+                    out = out[(out["PLAZA"] != "") & (out["PTO_VENTA_GLOBAL"] != "")]
+                    return out.reset_index(drop=True)
+        except Exception:
+            continue
+    return pd.DataFrame(columns=["PLAZA", "PTO_VENTA_GLOBAL"])
+
+
+@st.cache_data
+def _try_puntos_venta_from_uploaded_excel(excel_bytes: bytes) -> pd.DataFrame:
+    """
+    Fallback: intenta localizar en el Excel subido alguna hoja que tenga
+    columnas PLAZA y PTO.DEVENTAGLOBAL (o equivalente).
+    Lee primero pocas filas para identificar columnas, y luego carga completa esa hoja.
+    """
+    if not excel_bytes:
+        return pd.DataFrame(columns=["PLAZA", "PTO_VENTA_GLOBAL"])
+
+    try:
+        xl = pd.ExcelFile(BytesIO(excel_bytes))
+    except Exception:
+        return pd.DataFrame(columns=["PLAZA", "PTO_VENTA_GLOBAL"])
+
+    for sh in xl.sheet_names:
+        try:
+            df_head = pd.read_excel(BytesIO(excel_bytes), sheet_name=sh, nrows=200)
+            cols_norm = {_norm_col(c): c for c in df_head.columns}
+            if "PLAZA" in cols_norm and ("PTODEVENTAGLOBAL" in cols_norm or "PUNTODEVENTAGLOBAL" in cols_norm):
+                c_plaza = cols_norm["PLAZA"]
+                c_pv = cols_norm.get("PTODEVENTAGLOBAL") or cols_norm.get("PUNTODEVENTAGLOBAL")
+                df_full = pd.read_excel(BytesIO(excel_bytes), sheet_name=sh, usecols=[c_plaza, c_pv])
+                df_full = df_full.copy()
+                df_full.columns = ["PLAZA", "PTO_VENTA_GLOBAL"]
+                df_full["PLAZA"] = df_full["PLAZA"].astype(str).str.strip().str.upper()
+                df_full["PTO_VENTA_GLOBAL"] = df_full["PTO_VENTA_GLOBAL"].astype(str).str.strip()
+                df_full = df_full.dropna(subset=["PLAZA", "PTO_VENTA_GLOBAL"])
+                df_full = df_full[(df_full["PLAZA"] != "") & (df_full["PTO_VENTA_GLOBAL"] != "")]
+                return df_full.reset_index(drop=True)
+        except Exception:
+            continue
+
+    return pd.DataFrame(columns=["PLAZA", "PTO_VENTA_GLOBAL"])
+
+
+def get_puntos_venta_df(excel_bytes: bytes | None) -> pd.DataFrame:
+    """
+    1) Preferencia: archivo local 'puntos de venta EXP.xlsx' (si existe).
+    2) Si no existe, intenta extraerlo del Excel subido.
+    """
+    default_paths = (
+        "puntos de venta EXP.xlsx",
+        os.path.join(os.path.dirname(__file__), "puntos de venta EXP.xlsx") if "__file__" in globals() else "",
+        "/mnt/data/puntos de venta EXP.xlsx",
+    )
+    df_local = _load_puntos_venta_from_paths(default_paths)
+    if not df_local.empty:
+        return df_local
+    if excel_bytes:
+        return _try_puntos_venta_from_uploaded_excel(excel_bytes)
+    return pd.DataFrame(columns=["PLAZA", "PTO_VENTA_GLOBAL"])
+
+
+# ----------------------------------------------------
 # SEGURO (PRIMA MENSUAL)
 # ----------------------------------------------------
 def calcular_seguro_mensual(precio_base_seguro: float):
@@ -471,6 +573,8 @@ def crear_pdf_cotizacion(
     ejecutivo,
     attuid,
     ejecutivo_tel,  # ✅ teléfono del ejecutivo
+    plaza,          # ✅ NUEVO
+    pto_venta_global,  # ✅ NUEVO
     cliente,
     cliente_tel,
     cliente_email,
@@ -594,6 +698,7 @@ def crear_pdf_cotizacion(
     )
     left_table.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "MIDDLE")]))
 
+
     cliente_label = "<b>CLIENTE</b>"
     cliente_nombre = cliente or "—"
     tel_str = cliente_tel or "—"
@@ -609,12 +714,17 @@ def crear_pdf_cotizacion(
     center_para = Paragraph(center_html, styles["HeaderCenter"])
 
     ej_tel_str = ejecutivo_tel or "—"
+    plaza_str = plaza or "—"
+    pv_str = pto_venta_global or "—"
+
     header_right_text = (
         f"<b>FOLIO:</b> {folio}<br/>"
         f"<b>Emitido:</b> {fecha_str}<br/>"
         f"<b>Ejecutivo</b><br/>{pdf_safe_text(ejecutivo)}<br/>"
         f"<b>ATTUID:</b> {pdf_safe_text(attuid)}<br/>"
-        f"<b>Tel. Ejecutivo:</b> {pdf_safe_text(ej_tel_str)}"
+        f"<b>Tel. Ejecutivo:</b> {pdf_safe_text(ej_tel_str)}<br/>"
+        f"<b>Plaza:</b> {pdf_safe_text(plaza_str)}<br/>"
+        f"<b>Punto de Venta:</b> {pdf_safe_text(pv_str)}"
     )
     right_para = Paragraph(header_right_text, styles["HeaderRight"])
 
@@ -937,6 +1047,14 @@ if "is_control" not in st.session_state:
 if "ejecutivo_tel" not in st.session_state:
     st.session_state["ejecutivo_tel"] = ""
 
+# ✅ plaza / punto de venta
+if "plaza" not in st.session_state:
+    st.session_state["plaza"] = ""
+if "plaza_code" not in st.session_state:
+    st.session_state["plaza_code"] = ""
+if "pto_venta_global" not in st.session_state:
+    st.session_state["pto_venta_global"] = ""
+
 
 # ----------------------------------------------------
 # LOGIN PAGE (protects the whole app)
@@ -965,33 +1083,108 @@ if not st.session_state["authenticated"]:
 
 
 # ----------------------------------------------------
-# PANTALLA 1
+# PANTALLA 1  ✅ (Cotizador - Inicio)  -> PLAZA/PV arriba + TODO desde puntos de venta EXP.xlsx
 # ----------------------------------------------------
 if not st.session_state["logged_in"]:
     st.title("Cotizador - Inicio")
 
-    with st.form("login"):
-        ejecutivo = st.text_input("Nombre del ejecutivo:")
-        attuid = st.text_input("ATTUID:")
-        ejecutivo_tel = st.text_input("Teléfono del ejecutivo:")
+    ejecutivo = st.text_input("Nombre del ejecutivo:", value=st.session_state.get("ejecutivo", ""))
+    attuid = st.text_input("ATTUID:", value=st.session_state.get("attuid", ""))
+    ejecutivo_tel = st.text_input("Teléfono del ejecutivo:", value=st.session_state.get("ejecutivo_tel", ""))
+
+    # ✅ Cargar catálogo desde el Excel fijo: puntos de venta EXP.xlsx
+    pv_df = get_puntos_venta_df(None)
+
+    # Helpers para UI (mostrar bonito pero guardar código real)
+    def _plaza_ui(p: str) -> str:
+        p = (p or "").strip().upper()
+        if p == "CDMX":
+            return "CDMX"
+        return p.title()
+
+    # ✅ PLAZA + PV arriba del uploader
+    if pv_df.empty:
+        st.error(
+            "No pude cargar **puntos de venta EXP.xlsx**.\n\n"
+            "Asegúrate de que el archivo exista y tenga columnas **PLAZA** y **PTO.DEVENTAGLOBAL**."
+        )
+        st.selectbox("Plaza:", ["(sin catálogo)"], disabled=True)
+        st.selectbox("Punto de Venta:", ["(sin catálogo)"], disabled=True)
+
         archivo = st.file_uploader(
             "Sube la lista de precios (.xlsm / .xlsx / .xls)",
             type=["xlsm", "xlsx", "xls"],
         )
-        submitted = st.form_submit_button("Crear cotización")
+        st.button("Crear cotización", type="primary", disabled=True)
+        st.stop()
 
-    if submitted:
+    # Plazas: únicas, en el mismo orden que aparecen en el Excel
+    plazas_raw = (
+        pv_df["PLAZA"].dropna().astype(str).str.strip().str.upper()
+    )
+    plazas_raw = [p for p in plazas_raw.tolist() if p]
+    plazas_unique = list(dict.fromkeys(plazas_raw))  # mantiene orden del Excel
+
+    # Default (si ya había una seleccion previa)
+    prev_code = (st.session_state.get("plaza_code", "") or "").strip().upper()
+    default_code = prev_code if prev_code in plazas_unique else (plazas_unique[0] if plazas_unique else "")
+
+    idx_default = plazas_unique.index(default_code) if default_code in plazas_unique else 0
+
+    plaza_code = st.selectbox(
+        "Plaza:",
+        plazas_unique,
+        index=idx_default,
+        format_func=_plaza_ui,   # UI bonito, valores siguen siendo códigos reales
+    )
+
+    pv_opts = (
+        pv_df[pv_df["PLAZA"].astype(str).str.strip().str.upper() == plaza_code]["PTO_VENTA_GLOBAL"]
+        .dropna()
+        .astype(str)
+        .str.strip()
+        .unique()
+        .tolist()
+    )
+    pv_opts = sorted([x for x in pv_opts if x])
+
+    if not pv_opts:
+        st.error("No hay Puntos de Venta para esa Plaza en el Excel.")
+        pv_label = st.selectbox("Punto de Venta:", ["(sin opciones)"], disabled=True)
+    else:
+        prev_pv = (st.session_state.get("pto_venta_global", "") or "").strip()
+        idx_pv = pv_opts.index(prev_pv) if prev_pv in pv_opts else 0
+        pv_label = st.selectbox("Punto de Venta:", pv_opts, index=idx_pv)
+
+    # ✅ Ahora sí, abajo va el uploader (como pediste)
+    archivo = st.file_uploader(
+        "Sube la lista de precios (.xlsm / .xlsx / .xls)",
+        type=["xlsm", "xlsx", "xls"],
+    )
+
+    crear = st.button("Crear cotización", type="primary")
+
+    if crear:
         if not ejecutivo or not attuid or not ejecutivo_tel or not archivo:
             st.error("Por favor captura el nombre del ejecutivo, ATTUID, teléfono del ejecutivo y sube el archivo de precios.")
+        elif not plaza_code or (pv_opts and not pv_label):
+            st.error("Por favor selecciona Plaza y Punto de Venta Global.")
         else:
             st.session_state["ejecutivo"] = ejecutivo
             st.session_state["attuid"] = attuid
             st.session_state["ejecutivo_tel"] = ejecutivo_tel
             st.session_state["excel_bytes"] = archivo.getvalue()
+
+            # Guardamos:
+            st.session_state["plaza_code"] = plaza_code              # código real (del Excel)
+            st.session_state["plaza"] = _plaza_ui(plaza_code)        # texto bonito para mostrar/PDF
+            st.session_state["pto_venta_global"] = pv_label
+
             st.session_state["logged_in"] = True
             rerun()
 
     st.stop()
+
 
 
 # ----------------------------------------------------
@@ -1001,6 +1194,10 @@ st.title(
     f"Cotizador - Ejecutivo: {st.session_state['ejecutivo']} "
     f"(ATTUID: {st.session_state['attuid']}) "
     f"(Tel: {st.session_state.get('ejecutivo_tel','')})"
+)
+st.caption(
+    f"**Plaza:** {st.session_state.get('plaza','—')}  |  "
+    f"**Punto de Venta:** {st.session_state.get('pto_venta_global','—')}"
 )
 
 excel_bytes = st.session_state["excel_bytes"]
@@ -1279,7 +1476,7 @@ else:
             st.session_state["fichas_tecnicas"] = []
             st.session_state["is_portabilidad"] = False
             st.session_state["is_control"] = False
-            st.info("Se inició una nueva cotización (se conservarán ejecutivo, ATTUID y archivo).")
+            st.info("Se inició una nueva cotización (se conservarán ejecutivo, ATTUID, archivo, plaza y punto de venta).")
             rerun()
 
 # ----------------------------------------------------
@@ -1370,6 +1567,8 @@ else:
         ejecutivo=st.session_state["ejecutivo"],
         attuid=st.session_state["attuid"],
         ejecutivo_tel=st.session_state.get("ejecutivo_tel", ""),
+        plaza=st.session_state.get("plaza", ""),
+        pto_venta_global=st.session_state.get("pto_venta_global", ""),
         cliente=st.session_state["cliente"],
         cliente_tel=st.session_state["cliente_tel"],
         cliente_email=st.session_state["cliente_email"],
