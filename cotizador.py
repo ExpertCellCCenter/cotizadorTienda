@@ -358,20 +358,91 @@ def get_promociones_premium_df(excel_bytes: bytes) -> pd.DataFrame:
     return out[keep_cols].reset_index(drop=True)
 
 
+@st.cache_data
+def get_promociones_titanio_df(excel_bytes: bytes) -> pd.DataFrame:
+    """
+    Lee 'Promociones AT&T Titanio' y regresa un DF con:
+      - PromoEquipo, PromoKey
+      - PromoFechaInicio (date o None)
+      - PromoFechaFin (date o None si Indefinido)
+      - Columna promo Titanio: 24 MesesTitanio
+
+    Importante:
+      - "NA" -> NaN
+      - Se filtran SOLO las filas vigentes por fechas.
+    """
+    df0 = pd.read_excel(BytesIO(excel_bytes), sheet_name="Promociones AT&T Titanio", header=None)
+
+    data = df0.iloc[7:].copy()
+    data = data[data[5].notna()].copy()
+
+    out = pd.DataFrame()
+    out["PromoEquipo"] = data[5].astype(str).str.strip()
+    out["PromoKey"] = out["PromoEquipo"].apply(_normalize_key)
+
+    def _to_date(x):
+        if x is None or (isinstance(x, float) and pd.isna(x)):
+            return None
+        if isinstance(x, datetime):
+            return x.date()
+        if isinstance(x, date):
+            return x
+        if isinstance(x, str):
+            t = x.strip().upper()
+            if not t or "INDEFIN" in t:
+                return None
+            try:
+                return pd.to_datetime(x, errors="coerce").date()
+            except Exception:
+                return None
+        try:
+            dt = pd.to_datetime(x, errors="coerce")
+            if pd.isna(dt):
+                return None
+            return dt.date()
+        except Exception:
+            return None
+
+    out["PromoFechaInicio"] = data[8].apply(_to_date)
+    out["PromoFechaFin"] = data[9].apply(_to_date)
+
+    # Titanio solo trae 24 meses
+    out["24 MesesTitanio"] = data[7].apply(_money_to_float)
+
+    today = date.today()
+
+    def _is_valid(row):
+        s = row["PromoFechaInicio"]
+        e = row["PromoFechaFin"]
+        if s is not None and today < s:
+            return False
+        if e is not None and today > e:
+            return False
+        return True
+
+    out = out[out.apply(_is_valid, axis=1)].copy()
+
+    keep_cols = ["PromoEquipo", "PromoKey", "PromoFechaInicio", "PromoFechaFin", "24 MesesTitanio"]
+    return out[keep_cols].reset_index(drop=True)
+
+
 # ----------------------------------------------------
 # EXCEL: AT&T PREMIUM (base/lista) + MERGE con promos
 # ----------------------------------------------------
 @st.cache_data
 def get_equipos_df(excel_bytes: bytes) -> pd.DataFrame:
     """
-    Base/lista desde 'AT&T Premium' y merge con 'Promociones AT&T Premium'.
+    Base/lista desde 'AT&T Premium' y merge con:
+      - 'Promociones AT&T Premium'
+      - 'Promociones AT&T Titanio'
 
     ✅ Reglas:
-      - Si promo = NA/NaN -> usar el precio BASE del mismo plan/plazo en AT&T Premium.
-      - Si equipo NO aparece en promociones -> usar BASE (AT&T Premium).
-      - Si promo y base son NA/NaN -> NO APLICA (se manejará al presionar Ingresar).
+      - Si promo premium = NA/NaN -> usar el precio BASE del mismo plan/plazo en AT&T Premium.
+      - Si equipo NO aparece en promociones premium -> usar BASE.
+      - Titanio usa su propia columna: 24 MesesTitanio.
+      - Si promo y base son NA/NaN -> NO APLICA.
       - Vigencia final:
-          si existe FechaFin promo -> min(FechaFin promo, vigencia base)
+          si existe FechaFin promo premium -> min(FechaFin promo, vigencia base)
           si no -> vigencia base
       - Solo mostrar equipos vigentes (hoy <= VigenciaHasta)
     """
@@ -417,8 +488,9 @@ def get_equipos_df(excel_bytes: bytes) -> pd.DataFrame:
     df = df.drop(columns=base_promo_cols, errors="ignore")
 
     promos = get_promociones_premium_df(excel_bytes)
+    titanio_promos = get_promociones_titanio_df(excel_bytes)
 
-    if promos.empty:
+    if promos.empty and titanio_promos.empty:
         out = df.copy()
         out["VigenciaHasta"] = out["VigenciaHastaBase"]
         today = date.today()
@@ -428,16 +500,14 @@ def get_equipos_df(excel_bytes: bytes) -> pd.DataFrame:
         base_keep = [c for c in base_keep if c in out.columns]
         return out[["Nombre Completo", "PrecioLista", "VigenciaHasta"] + base_keep]
 
-    promo_keys = promos["PromoKey"].tolist()
-
-    def _find_promo_idx(base_key: str):
+    def _find_best_idx(base_key: str, keys: list):
         if not base_key:
             return None
 
         best_i = None
         best_score = None
 
-        for i, pk in enumerate(promo_keys):
+        for i, pk in enumerate(keys):
             if not pk:
                 continue
 
@@ -451,10 +521,24 @@ def get_equipos_df(excel_bytes: bytes) -> pd.DataFrame:
 
         return best_i
 
-    df["_promo_i"] = df["BaseKey"].apply(_find_promo_idx)
+    # Merge promociones premium
+    promo_keys = promos["PromoKey"].tolist()
+    df["_promo_i"] = df["BaseKey"].apply(lambda k: _find_best_idx(k, promo_keys))
 
     promos2 = promos.reset_index().rename(columns={"index": "_promo_i"})
     df = df.merge(promos2, on="_promo_i", how="left")
+
+    # Merge promociones Titanio
+    if not titanio_promos.empty:
+        titanio_keys = titanio_promos["PromoKey"].tolist()
+        df["_titanio_i"] = df["BaseKey"].apply(lambda k: _find_best_idx(k, titanio_keys))
+
+        titanio2 = titanio_promos.reset_index().rename(columns={"index": "_titanio_i"})
+        df = df.merge(
+            titanio2[["_titanio_i", "24 MesesTitanio"]],
+            on="_titanio_i",
+            how="left",
+        )
 
     def _vigencia_final(row):
         pf = row.get("PromoFechaFin", None)
@@ -473,17 +557,19 @@ def get_equipos_df(excel_bytes: bytes) -> pd.DataFrame:
     df = df[df["VigenciaHasta"] >= today].copy()
 
     promo_cols = [c for c in promos.columns if "Meses" in str(c)]
+    titanio_cols = ["24 MesesTitanio"] if "24 MesesTitanio" in df.columns else []
+
     base_keep = [f"Base_{str(c).strip()}" for c in base_promo_cols]
     base_keep = [c for c in base_keep if c in df.columns]
 
-    cols_return = ["Nombre Completo", "PrecioLista", "VigenciaHasta"] + promo_cols + base_keep
+    cols_return = ["Nombre Completo", "PrecioLista", "VigenciaHasta"] + promo_cols + titanio_cols + base_keep
     cols_return = [c for c in cols_return if c in df.columns]
     return df[cols_return]
-
 
 # ----------------------------------------------------
 # PLAN OPTIONS (desde hoja Promociones AT&T Premium)
 # ----------------------------------------------------
+@st.cache_data
 @st.cache_data
 def get_plan_options(excel_bytes: bytes):
     df0 = pd.read_excel(BytesIO(excel_bytes), sheet_name="Promociones AT&T Premium", header=None)
@@ -515,8 +601,35 @@ def get_plan_options(excel_bytes: bytes):
 
         options.append(dict(plan=label, costo=p, gb=gb, suffix=suffix))
 
-    return options
+    # ✅ Agregar Titanio desde su propia hoja
+    try:
+        df_titanio = pd.read_excel(BytesIO(excel_bytes), sheet_name="Promociones AT&T Titanio", header=None)
 
+        name = df_titanio.iloc[4, 7]
+        price = df_titanio.iloc[5, 7]
+
+        if not pd.isna(name) and not pd.isna(price):
+            label = str(name).strip()
+            if label and "GB" in label.upper():
+                p = float(price)
+
+                gb = ""
+                m = re.search(r"\(([^)]*)\)", label)
+                if m:
+                    gb = m.group(1).strip()
+
+                options.append(
+                    dict(
+                        plan=label,
+                        costo=p,
+                        gb=gb,
+                        suffix="Titanio",
+                    )
+                )
+    except Exception:
+        pass
+
+    return options
 
 def _promo_valida_para_plan(row_equipo: pd.Series, plazo: int, plan_suffix: str) -> bool:
     base = f"{plazo} Meses"
